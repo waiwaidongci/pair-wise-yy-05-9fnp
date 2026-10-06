@@ -5,6 +5,7 @@ import {
   QueryResult,
   SavedView,
   SortState,
+  SubmitOutcome,
   TableRow,
 } from '../types/table.models';
 
@@ -37,3 +38,20 @@ export const updateCell = createAction(
 export const saveView = createAction('[Order Table] Save View', props<{ name: string }>());
 export const applyView = createAction('[Order Table] Apply View', props<{ view: SavedView }>());
 export const deleteView = createAction('[Order Table] Delete View', props<{ id: string }>());
+export const setOnline = createAction('[Order Table] Set Online', props<{ online: boolean }>());
+export const flushChanges = createAction('[Order Table] Flush Changes');
+export const syncStarted = createAction('[Order Table] Sync Started', props<{ commitIds: string[] }>());
+export const syncSucceeded = createAction(
+  '[Order Table] Sync Succeeded',
+  props<{ results: SubmitOutcome[] }>(),
+);
+export const syncFailed = createAction(
+  '[Order Table] Sync Failed',
+  props<{ commitIds: string[]; error: string }>(),
+);
+export const retryFailedChanges = createAction('[Order Table] Retry Failed Changes');
+export const discardChange = createAction('[Order Table] Discard Change', props<{ commitId: string }>());
+export const resolveConflict = createAction(
+  '[Order Table] Resolve Conflict',
+  props<{ id: string; keep: 'local' | 'remote' }>(),
+);

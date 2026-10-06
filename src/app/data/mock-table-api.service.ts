@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
-import { Observable, of } from 'rxjs';
-import { delay } from 'rxjs/operators';
+import { Observable, of, throwError, timer } from 'rxjs';
+import { delay, mergeMap } from 'rxjs/operators';
 import {
   AggregateResult,
   CellValue,
@@ -8,8 +8,10 @@ import {
   FilterGroup,
   FilterNode,
   GroupSummary,
+  OrderChange,
   QueryRequest,
   QueryResult,
+  SubmitOutcome,
   TableRow,
 } from '../types/table.models';
 
@@ -21,6 +23,81 @@ const STATUSES: TableRow['status'][] = ['待审核', '进行中', '已发货', '
 @Injectable({ providedIn: 'root' })
 export class MockTableApiService {
   private readonly rows: TableRow[] = this.createRows(50000);
+  /** 已入库的提交号：重复提交只入库一次 */
+  private readonly appliedCommitIds = new Set<string>();
+  /** 字段级变更台账：key 为 `订单ID::字段`，记录当前服务端值与最后提交人 */
+  private readonly fieldLedger = new Map<string, { value: CellValue; commitId: string; author: string }>();
+  /** 模拟网络抖动：提交有一定概率整批失败，前端可凭本地副本重试 */
+  failureRate = 0.15;
+
+  /** 提交一批（同一订单的）字段变更，按字段合并入库 */
+  submitChanges(changes: OrderChange[]): Observable<SubmitOutcome[]> {
+    if (Math.random() < this.failureRate) {
+      return timer(180).pipe(
+        mergeMap(() => throwError(() => new Error('网络超时，本批变更未送达服务器'))),
+      );
+    }
+    const results = changes.map((change) => this.applyChange(change));
+    return of(results).pipe(delay(140));
+  }
+
+  /** 模拟另一名运营在服务端改了同一字段，用于演示冲突 */
+  simulateExternalEdit(orderId: string, field: keyof TableRow): void {
+    const row = this.rows.find((item) => item.id === orderId);
+    if (!row) {
+      return;
+    }
+    const current = row[field];
+    const next: CellValue =
+      typeof current === 'number'
+        ? Math.round(Number(current) * 1.1 * 100) / 100
+        : `${String(current ?? '')}·改`;
+    row[field] = next;
+    row.updatedAt = this.now();
+    this.fieldLedger.set(this.ledgerKey(orderId, field), {
+      value: next,
+      commitId: `external-${Date.now()}`,
+      author: '林月',
+    });
+  }
+
+  private applyChange(change: OrderChange): SubmitOutcome {
+    // 幂等：同一 commitId 重复提交只入库一次
+    if (this.appliedCommitIds.has(change.commitId)) {
+      return { commitId: change.commitId, outcome: 'duplicate' };
+    }
+    const row = this.rows.find((item) => item.id === change.orderId);
+    if (!row) {
+      return { commitId: change.commitId, outcome: 'applied' };
+    }
+    const key = this.ledgerKey(change.orderId, change.field);
+    const ledgerEntry = this.fieldLedger.get(key);
+    if (ledgerEntry && ledgerEntry.value !== change.baseValue) {
+      // 同一字段在本地基准之后被别人改过：保留双方版本，返回冲突
+      return {
+        commitId: change.commitId,
+        outcome: 'conflict',
+        serverValue: ledgerEntry.value,
+        serverAuthor: ledgerEntry.author,
+      };
+    }
+    // 不同字段互不干扰，逐字段合并入库
+    row[change.field] = change.value;
+    row.updatedAt = this.now();
+    this.fieldLedger.set(key, { value: change.value, commitId: change.commitId, author: change.author });
+    this.appliedCommitIds.add(change.commitId);
+    return { commitId: change.commitId, outcome: 'applied' };
+  }
+
+  private ledgerKey(orderId: string, field: keyof TableRow): string {
+    return `${orderId}::${String(field)}`;
+  }
+
+  private now(): string {
+    const now = new Date();
+    const pad = (value: number): string => String(value).padStart(2, '0');
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  }
 
   query(request: QueryRequest): Observable<QueryResult> {
     const startedAt = performance.now();

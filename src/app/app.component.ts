@@ -17,8 +17,10 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Store } from '@ngrx/store';
+import { Actions, ofType } from '@ngrx/effects';
 import { DataGridComponent, GridColumn } from './components/data-grid/data-grid.component';
 import { FilterBuilderComponent } from './components/filter-builder/filter-builder.component';
+import { MockTableApiService } from './data/mock-table-api.service';
 import * as TableActions from './stores/table.actions';
 import {
   selectAllColumnDefinitions,
@@ -26,7 +28,7 @@ import {
   selectTableState,
   selectVisibleColumnDefinitions,
 } from './stores/table.selectors';
-import { FilterGroup, SavedView, SortState, TableRow } from './types/table.models';
+import { ChangeStatus, FilterGroup, SavedView, SortState, TableRow } from './types/table.models';
 
 @Component({
   selector: 'app-root',
@@ -225,6 +227,17 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
               <button mat-menu-item (click)="setDensity('standard')">标准</button>
               <button mat-menu-item (click)="setDensity('comfortable')">宽松</button>
             </mat-menu>
+            <button mat-stroked-button type="button" (click)="toggleOnline()">
+              <mat-icon>{{ state.online ? 'cloud_done' : 'cloud_off' }}</mat-icon>
+              {{ state.online ? '在线' : '模拟断网中' }}
+            </button>
+            <button mat-stroked-button type="button" (click)="toggleChangeCenter()">
+              <mat-icon>published_with_changes</mat-icon>
+              变更中心
+              @if (pendingCount()) {
+                <span class="count-badge">{{ pendingCount() }}</span>
+              }
+            </button>
           </div>
 
           @if (showFilterPanel()) {
@@ -241,6 +254,92 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
             </div>
           }
         </section>
+
+        @if (showChangeCenter()) {
+          <section class="change-panel">
+            <div class="change-panel__head">
+              <strong>订单变更提交</strong>
+              <span class="muted">按订单号合并补交 · 重复提交自动去重 · 断网暂存本地副本</span>
+              <span class="spacer"></span>
+              <button mat-button type="button" [disabled]="!failedCount()" (click)="retryFailed()">
+                重试失败 ({{ failedCount() }})
+              </button>
+              <button mat-button type="button" [disabled]="!activeChanges().length" (click)="simulateExternal()">
+                模拟另一运营改同字段
+              </button>
+            </div>
+
+            @if (conflicts().length) {
+              <div class="change-group">
+                <p class="change-group__title change-group__title--conflict">
+                  字段冲突（双方版本已保留，请选择）
+                </p>
+                @for (conflict of conflicts(); track conflict.id) {
+                  <div class="change-item">
+                    <span class="change-item__order">{{ conflict.orderNo }}</span>
+                    <span class="change-item__field">{{ fieldLabel(conflict.field) }}</span>
+                    <span>本地：<strong>{{ conflict.localValue }}</strong></span>
+                    <span>远端（{{ conflict.remoteAuthor }}）：<strong>{{ conflict.remoteValue }}</strong></span>
+                    <span class="spacer"></span>
+                    <button mat-stroked-button type="button" (click)="resolveConflict(conflict.id, 'local')">
+                      保留本地
+                    </button>
+                    <button mat-stroked-button type="button" (click)="resolveConflict(conflict.id, 'remote')">
+                      采用远端
+                    </button>
+                  </div>
+                }
+              </div>
+            }
+
+            @if (activeChanges().length) {
+              <div class="change-group">
+                <p class="change-group__title">待同步变更</p>
+                @for (change of activeChanges(); track change.commitId) {
+                  <div class="change-item">
+                    <span class="change-item__order">{{ change.orderNo }}</span>
+                    <span class="change-item__field">{{ fieldLabel(change.field) }}</span>
+                    <span class="change-item__delta">{{ change.baseValue }} → <strong>{{ change.value }}</strong></span>
+                    <span class="change-status" [ngClass]="'change-status--' + change.status">
+                      {{ statusLabel(change.status) }}
+                    </span>
+                    @if (change.lastError) {
+                      <span class="change-item__error">{{ change.lastError }}</span>
+                    }
+                    <span class="spacer"></span>
+                    <button
+                      mat-icon-button
+                      type="button"
+                      matTooltip="撤销该变更"
+                      (click)="discardChange(change.commitId)"
+                    >
+                      <mat-icon>close</mat-icon>
+                    </button>
+                  </div>
+                }
+              </div>
+            }
+
+            @if (syncedChanges().length) {
+              <div class="change-group">
+                <p class="change-group__title">已入库（最近 {{ syncedChanges().length }} 条）</p>
+                @for (change of syncedChanges(); track change.commitId) {
+                  <div class="change-item change-item--synced">
+                    <mat-icon>check_circle</mat-icon>
+                    <span class="change-item__order">{{ change.orderNo }}</span>
+                    <span class="change-item__field">{{ fieldLabel(change.field) }}</span>
+                    <span class="change-item__delta">{{ change.baseValue }} → {{ change.value }}</span>
+                    <span class="muted">{{ change.createdAt | date:'HH:mm:ss' }}</span>
+                  </div>
+                }
+              </div>
+            }
+
+            @if (!activeChanges().length && !conflicts().length && !syncedChanges().length) {
+              <p class="change-empty">暂无变更，双击表格单元格即可编辑并生成可追踪提交。</p>
+            }
+          </section>
+        }
 
         @if (state.groups.length) {
           <section class="group-strip">
@@ -262,6 +361,11 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
             <span class="muted">· 查询 {{ state.elapsedMs }}ms</span>
             @if (state.selectedIds.length) {
               <span class="selection-note">已选择 {{ state.selectedIds.length }} 行</span>
+            }
+            @if (!state.online) {
+              <span class="offline-note">已断网 · 变更暂存本地，回网后自动补交</span>
+            } @else if (pendingCount()) {
+              <span class="selection-note">{{ pendingCount() }} 条变更待同步</span>
             }
             <span class="spacer"></span>
             <span class="muted">双击单元格可内联编辑</span>
@@ -608,6 +712,89 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
       margin-left: 12px;
       color: #175cd3;
     }
+    .offline-note {
+      margin-left: 12px;
+      color: #b42318;
+    }
+    .change-panel {
+      margin-top: 12px;
+      padding: 14px;
+      border: 1px solid #f6d08a;
+      border-radius: 12px;
+      background: #fffaeb;
+    }
+    .change-panel__head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+    .change-group {
+      margin-top: 10px;
+    }
+    .change-group__title {
+      margin: 0 0 6px;
+      color: #667085;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .change-group__title--conflict {
+      color: #b42318;
+    }
+    .change-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+      padding: 6px 10px;
+      border: 1px solid #eaecf0;
+      border-radius: 7px;
+      background: #fff;
+      font-size: 12px;
+    }
+    .change-item__order {
+      color: #175cd3;
+      font-weight: 700;
+    }
+    .change-item__field {
+      color: #475467;
+    }
+    .change-item__delta {
+      color: #344054;
+    }
+    .change-item__error {
+      color: #b42318;
+    }
+    .change-item--synced {
+      color: #667085;
+    }
+    .change-item--synced mat-icon {
+      width: 16px;
+      height: 16px;
+      color: #12b76a;
+      font-size: 16px;
+    }
+    .change-status {
+      padding: 2px 8px;
+      border-radius: 9px;
+      background: #eef4ff;
+      color: #175cd3;
+      font-size: 11px;
+    }
+    .change-status--syncing {
+      background: #fffaeb;
+      color: #b54708;
+    }
+    .change-status--failed,
+    .change-status--conflict {
+      background: #fef3f2;
+      color: #b42318;
+    }
+    .change-empty {
+      margin: 8px 0 0;
+      color: #98a2b3;
+      font-size: 12px;
+    }
     app-data-grid {
       min-height: 0;
       flex: 1;
@@ -632,13 +819,27 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
 export class AppComponent {
   private readonly store = inject(Store);
   private readonly snackBar = inject(MatSnackBar);
+  private readonly actions$ = inject(Actions);
+  private readonly api = inject(MockTableApiService);
 
   readonly tableState = this.store.selectSignal(selectTableState);
   readonly allColumns = this.store.selectSignal(selectAllColumnDefinitions);
   readonly visibleColumns = this.store.selectSignal(selectVisibleColumnDefinitions) as unknown as () => GridColumn[];
   readonly pageCount = this.store.selectSignal(selectPageCount);
   readonly showFilterPanel = signal(false);
+  readonly showChangeCenter = signal(false);
   readonly conditionCount = computed(() => this.countConditions(this.tableState().filter));
+  readonly activeChanges = computed(() =>
+    this.tableState().changes.filter((change) => change.status !== 'synced'),
+  );
+  readonly syncedChanges = computed(() =>
+    this.tableState().changes.filter((change) => change.status === 'synced').slice(-8).reverse(),
+  );
+  readonly conflicts = computed(() => this.tableState().conflicts);
+  readonly pendingCount = computed(() => this.activeChanges().length + this.conflicts().length);
+  readonly failedCount = computed(
+    () => this.tableState().changes.filter((change) => change.status === 'failed').length,
+  );
   readonly compactAmount = computed(() => {
     const amount = this.tableState().aggregates.amount;
     if (amount >= 100000000) return `${(amount / 100000000).toFixed(2)} 亿`;
@@ -648,6 +849,33 @@ export class AppComponent {
 
   constructor() {
     this.store.dispatch(TableActions.loadPage({ refresh: true }));
+    window.addEventListener('online', () =>
+      this.store.dispatch(TableActions.setOnline({ online: true })),
+    );
+    window.addEventListener('offline', () =>
+      this.store.dispatch(TableActions.setOnline({ online: false })),
+    );
+    this.actions$.pipe(ofType(TableActions.syncSucceeded)).subscribe(({ results }) => {
+      const applied = results.filter((result) => result.outcome === 'applied').length;
+      const conflicts = results.filter((result) => result.outcome === 'conflict').length;
+      if (applied) {
+        this.snackBar.open(`已提交 ${applied} 条订单变更，列表与订单总额已重算`, '关闭', {
+          duration: 2200,
+        });
+      }
+      if (conflicts) {
+        this.snackBar
+          .open(`发现 ${conflicts} 条字段冲突，双方版本已保留`, '去处理', { duration: 4500 })
+          .onAction()
+          .subscribe(() => this.showChangeCenter.set(true));
+      }
+    });
+    this.actions$.pipe(ofType(TableActions.syncFailed)).subscribe(({ error }) => {
+      this.snackBar
+        .open(`提交失败：${error}，变更已保留本地副本`, '重试', { duration: 4500 })
+        .onAction()
+        .subscribe(() => this.store.dispatch(TableActions.retryFailedChanges()));
+    });
   }
 
   refresh(): void {
@@ -735,7 +963,55 @@ export class AppComponent {
 
   updateCell(event: { id: string; key: keyof TableRow; value: string | number | boolean | null }): void {
     this.store.dispatch(TableActions.updateCell(event));
-    this.snackBar.open('单元格已更新，将进入待提交变更区', '关闭', { duration: 1600 });
+    this.snackBar.open('已生成可追踪变更，等待同步入库', '关闭', { duration: 1600 });
+  }
+
+  toggleOnline(): void {
+    this.store.dispatch(TableActions.setOnline({ online: !this.tableState().online }));
+  }
+
+  toggleChangeCenter(): void {
+    this.showChangeCenter.update((value) => !value);
+  }
+
+  retryFailed(): void {
+    this.store.dispatch(TableActions.retryFailedChanges());
+  }
+
+  discardChange(commitId: string): void {
+    this.store.dispatch(TableActions.discardChange({ commitId }));
+  }
+
+  resolveConflict(id: string, keep: 'local' | 'remote'): void {
+    this.store.dispatch(TableActions.resolveConflict({ id, keep }));
+    this.snackBar.open(keep === 'local' ? '已保留本地版本，将重新提交' : '已采用远端版本', '关闭', {
+      duration: 1800,
+    });
+  }
+
+  /** 演示用：让另一运营在服务端先改了同一字段，触发冲突 */
+  simulateExternal(): void {
+    const target = this.activeChanges()[0];
+    if (!target) {
+      return;
+    }
+    this.api.simulateExternalEdit(target.orderId, target.field);
+    this.store.dispatch(TableActions.flushChanges());
+    this.snackBar.open(`已模拟另一运营修改 ${target.orderNo} 的同一字段`, '关闭', { duration: 2000 });
+  }
+
+  fieldLabel(key: keyof TableRow): string {
+    return this.allColumns().find((column) => column.key === key)?.label ?? String(key);
+  }
+
+  statusLabel(status: ChangeStatus): string {
+    return {
+      pending: '待同步',
+      syncing: '同步中',
+      synced: '已入库',
+      failed: '失败',
+      conflict: '冲突',
+    }[status];
   }
 
   toggleExpand(id: string): void {
@@ -760,6 +1036,15 @@ export class AppComponent {
   }
 
   applyView(view: SavedView): void {
+    // 旧视图过期：保存视图后订单数据已有变更，需确认再套用
+    if (view.dataVersion !== this.tableState().dataVersion) {
+      const confirmed = window.confirm(
+        `视图「${view.name}」保存之后订单数据已发生变更，列表与订单总额均已重算。仍要套用该旧视图吗？`,
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
     this.store.dispatch(TableActions.applyView({ view }));
   }
 
