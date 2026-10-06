@@ -3,7 +3,7 @@ import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatChipsModule } from '@angular/material/chips';
-import { MatDialogModule } from '@angular/material/dialog';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatDividerModule } from '@angular/material/divider';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
@@ -17,16 +17,26 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Store } from '@ngrx/store';
+import { ConfirmDialogComponent } from './components/confirm-dialog/confirm-dialog.component';
 import { DataGridComponent, GridColumn } from './components/data-grid/data-grid.component';
 import { FilterBuilderComponent } from './components/filter-builder/filter-builder.component';
+import { MockTableApiService } from './data/mock-table-api.service';
 import * as TableActions from './stores/table.actions';
 import {
   selectAllColumnDefinitions,
+  selectCommits,
+  selectConflictCommits,
+  selectDirtyCells,
+  selectDisplayAggregates,
+  selectFailedCommits,
+  selectOnline,
   selectPageCount,
+  selectPendingCommits,
+  selectSyncing,
   selectTableState,
   selectVisibleColumnDefinitions,
 } from './stores/table.selectors';
-import { FilterGroup, SavedView, SortState, TableRow } from './types/table.models';
+import { ChangeCommit, FilterGroup, SavedView, SortState, TableRow } from './types/table.models';
 
 @Component({
   selector: 'app-root',
@@ -54,6 +64,7 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
   ],
   template: `
     @let state = tableState();
+    @let totals = displayAggregates();
     <mat-toolbar class="app-toolbar">
       <div class="brand">
         <span class="brand__mark"><mat-icon>dataset</mat-icon></span>
@@ -65,6 +76,21 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
       <span class="environment">生产环境</span>
       <span class="spacer"></span>
       <span class="dataset-count">模拟数据集 50,000 行</span>
+      <span class="online-pill" [class.online-pill--offline]="!online()">
+        <mat-icon>{{ online() ? 'wifi' : 'wifi_off' }}</mat-icon>
+        {{ online() ? '在线' : '离线' }}
+      </span>
+      @if (pendingCount()) {
+        <span class="pending-badge">{{ pendingCount() }} 项待同步</span>
+      }
+      <button mat-stroked-button type="button" [disabled]="!online() || syncing() || !pendingCount()" (click)="syncNow()">
+        <mat-icon>sync</mat-icon>
+        {{ syncing() ? '同步中…' : '立即同步' }}
+      </button>
+      <button mat-stroked-button type="button" (click)="toggleForceFailure()">
+        <mat-icon>{{ forceFailure() ? 'check_circle' : 'error_outline' }}</mat-icon>
+        {{ forceFailure() ? '关闭模拟失败' : '模拟失败' }}
+      </button>
       <button mat-icon-button matTooltip="通知"><mat-icon>notifications_none</mat-icon></button>
       <button mat-button>
         <span class="avatar">万</span>
@@ -111,16 +137,68 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
           </div>
           <div class="metric">
             <span>订单总额</span>
-            <strong>¥{{ compactAmount() }}</strong>
+            <strong>¥{{ compactAmount(totals.amount) }}</strong>
           </div>
           <div class="metric">
             <span>平均毛利率</span>
-            <strong>{{ state.aggregates.averageMargin }}%</strong>
+            <strong>{{ totals.averageMargin }}%</strong>
           </div>
           <div class="metric">
             <span>当前选择</span>
             <strong>{{ state.selectedIds.length }} 行</strong>
           </div>
+        </div>
+
+        <mat-divider />
+
+        <div class="side-panel__section">
+          <p class="side-panel__eyebrow">变更提交</p>
+          @if (!commits().length) {
+            <p class="empty-hint">暂无变更提交</p>
+          }
+          @for (commit of commits(); track commit.id) {
+            <div
+              class="commit-card"
+              [class.commit-card--conflict]="commit.status === 'conflict'"
+              [class.commit-card--failed]="commit.status === 'failed'"
+            >
+              <div class="commit-card__head">
+                <strong>{{ commit.orderNo }}</strong>
+                <span class="commit-status" [class]="'commit-status--' + commit.status">
+                  {{ statusLabel(commit.status) }}
+                </span>
+              </div>
+              <div class="commit-card__fields">
+                @for (change of commit.changes; track change.field) {
+                  <span class="field-chip">
+                    {{ columnLabel(change.field) }}
+                    <em>{{ formatValue(change.baseValue) }} → {{ formatValue(change.newValue) }}</em>
+                  </span>
+                }
+              </div>
+              @if (commit.status === 'conflict' && commit.conflicts?.length) {
+                <div class="commit-card__conflicts">
+                  @for (conflict of commit.conflicts; track conflict.field) {
+                    <div class="conflict-row">
+                      <span>{{ columnLabel(conflict.field) }}冲突</span>
+                      <button mat-button type="button" (click)="resolveConflict(commit.id, conflict.field, 'local')">
+                        保留本地 {{ formatValue(conflict.localValue) }}
+                      </button>
+                      <button mat-button type="button" (click)="resolveConflict(commit.id, conflict.field, 'remote')">
+                        采用服务端 {{ formatValue(conflict.remoteValue) }}
+                      </button>
+                    </div>
+                  }
+                </div>
+              }
+              @if (commit.status === 'failed') {
+                <button mat-stroked-button type="button" (click)="retryCommit(commit.id)">
+                  <mat-icon>refresh</mat-icon>
+                  从副本重试
+                </button>
+              }
+            </div>
+          }
         </div>
 
         <mat-divider />
@@ -139,7 +217,7 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
           <div>
             <span class="breadcrumb">订单中心 / 销售订单</span>
             <h1>销售订单明细</h1>
-            <p>服务端分页查询、复杂表达式筛选、聚合分析与可复用列视图。</p>
+            <p>字段变更以提交方式追踪，按订单号合并、幂等入库，断网可待同步、回网补交。</p>
           </div>
           <div class="page-actions">
             <button mat-stroked-button type="button" (click)="refresh()">
@@ -276,13 +354,14 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
             [density]="state.density"
             [sort]="state.sort"
             [selectedIds]="state.selectedIds"
-            [dirtyCells]="state.dirtyCells"
+            [dirtyCells]="dirtyCells()"
+            [conflictIds]="conflictIds()"
             [expandedIds]="state.expandedIds"
             [treeMode]="state.treeMode"
             (sortChange)="changeSort($event)"
             (resize)="resizeColumn($event.key, $event.width)"
             (selectionChange)="setSelection($event)"
-            (edit)="updateCell($event)"
+            (edit)="commitCell($event)"
             (expand)="toggleExpand($event)"
             (inspect)="showRow($event)"
           />
@@ -351,6 +430,34 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
       color: #027a48;
       font-size: 11px;
     }
+    .online-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-right: 10px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: #ecfdf3;
+      color: #027a48;
+      font-size: 12px;
+    }
+    .online-pill mat-icon {
+      font-size: 16px;
+      width: 16px;
+      height: 16px;
+    }
+    .online-pill--offline {
+      background: #fef3f2;
+      color: #b42318;
+    }
+    .pending-badge {
+      margin-right: 10px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: #fffaeb;
+      color: #b54708;
+      font-size: 12px;
+    }
     .dataset-count {
       margin-right: 14px;
       color: #667085;
@@ -371,7 +478,7 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
       background: #eef2f7;
     }
     .side-panel {
-      width: 224px;
+      width: 248px;
       border: 0;
       border-right: 1px solid #d8e0eb;
       background: #fbfcfe;
@@ -386,6 +493,11 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
       font-weight: 700;
       letter-spacing: .08em;
       text-transform: uppercase;
+    }
+    .empty-hint {
+      margin: 0;
+      color: #98a2b3;
+      font-size: 12px;
     }
     .view-link {
       display: flex;
@@ -427,6 +539,100 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
     .metric strong {
       color: #172033;
       font-size: 14px;
+    }
+    .commit-card {
+      margin-bottom: 10px;
+      padding: 10px;
+      border: 1px solid #e4e7ec;
+      border-radius: 8px;
+      background: #fff;
+    }
+    .commit-card--conflict {
+      border-color: #f79009;
+      background: #fffaeb;
+    }
+    .commit-card--failed {
+      border-color: #fda29b;
+      background: #fef3f2;
+    }
+    .commit-card__head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .commit-card__head strong {
+      font-size: 13px;
+      color: #172033;
+    }
+    .commit-status {
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 10px;
+    }
+    .commit-status--synced {
+      background: #ecfdf3;
+      color: #027a48;
+    }
+    .commit-status--pending,
+    .commit-status--syncing {
+      background: #eef4ff;
+      color: #175cd3;
+    }
+    .commit-status--conflict {
+      background: #fffaeb;
+      color: #b54708;
+    }
+    .commit-status--failed {
+      background: #fef3f2;
+      color: #b42318;
+    }
+    .commit-card__fields {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .field-chip {
+      display: inline-flex;
+      flex-direction: column;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: #f2f4f7;
+      color: #475467;
+      font-size: 11px;
+    }
+    .field-chip em {
+      font-style: normal;
+      color: #172033;
+    }
+    .commit-card__conflicts {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1 dashed #e4e7ec;
+    }
+    .conflict-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      margin-top: 6px;
+      font-size: 11px;
+      color: #b54708;
+    }
+    .conflict-row button {
+      padding: 2px 6px;
+      border: 1px solid #f79009;
+      border-radius: 5px;
+      background: #fff;
+      color: #b54708;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .commit-card button[mat-stroked-button] {
+      margin-top: 8px;
+      width: 100%;
+      font-size: 12px;
     }
     .tips p {
       margin: 8px 0;
@@ -632,19 +838,26 @@ import { FilterGroup, SavedView, SortState, TableRow } from './types/table.model
 export class AppComponent {
   private readonly store = inject(Store);
   private readonly snackBar = inject(MatSnackBar);
+  private readonly dialog = inject(MatDialog);
+  private readonly api = inject(MockTableApiService);
 
   readonly tableState = this.store.selectSignal(selectTableState);
   readonly allColumns = this.store.selectSignal(selectAllColumnDefinitions);
   readonly visibleColumns = this.store.selectSignal(selectVisibleColumnDefinitions) as unknown as () => GridColumn[];
   readonly pageCount = this.store.selectSignal(selectPageCount);
+  readonly displayAggregates = this.store.selectSignal(selectDisplayAggregates);
+  readonly commits = this.store.selectSignal(selectCommits);
+  readonly pendingCommits = this.store.selectSignal(selectPendingCommits);
+  readonly conflictCommits = this.store.selectSignal(selectConflictCommits);
+  readonly failedCommits = this.store.selectSignal(selectFailedCommits);
+  readonly online = this.store.selectSignal(selectOnline);
+  readonly syncing = this.store.selectSignal(selectSyncing);
+  readonly dirtyCells = this.store.selectSignal(selectDirtyCells);
+  readonly forceFailure = signal(this.api.isForceFailure());
   readonly showFilterPanel = signal(false);
   readonly conditionCount = computed(() => this.countConditions(this.tableState().filter));
-  readonly compactAmount = computed(() => {
-    const amount = this.tableState().aggregates.amount;
-    if (amount >= 100000000) return `${(amount / 100000000).toFixed(2)} 亿`;
-    if (amount >= 10000) return `${(amount / 10000).toFixed(1)} 万`;
-    return amount.toLocaleString('zh-CN');
-  });
+  readonly pendingCount = computed(() => this.pendingCommits().length);
+  readonly conflictIds = computed(() => this.conflictCommits().map((commit) => commit.orderId));
 
   constructor() {
     this.store.dispatch(TableActions.loadPage({ refresh: true }));
@@ -699,6 +912,10 @@ export class AppComponent {
     return this.allColumns().find((column) => column.key === key)?.label ?? String(key);
   }
 
+  columnLabel(key: keyof TableRow): string {
+    return this.allColumns().find((column) => column.key === key)?.label ?? String(key);
+  }
+
   toggleTree(): void {
     this.store.dispatch(TableActions.toggleTreeMode());
   }
@@ -733,9 +950,58 @@ export class AppComponent {
     this.store.dispatch(TableActions.setSelection({ ids }));
   }
 
-  updateCell(event: { id: string; key: keyof TableRow; value: string | number | boolean | null }): void {
-    this.store.dispatch(TableActions.updateCell(event));
-    this.snackBar.open('单元格已更新，将进入待提交变更区', '关闭', { duration: 1600 });
+  /** 单元格编辑 → 生成可追踪提交（记录订单号、字段、本地基准） */
+  commitCell(event: { id: string; key: keyof TableRow; value: string | number | boolean | null; baseValue: string | number | boolean | null }): void {
+    const row = this.tableState().rows.find((item) => item.id === event.id);
+    const orderNo = row?.orderNo ?? event.id;
+    this.store.dispatch(
+      TableActions.commitCell({
+        id: event.id,
+        orderNo,
+        key: event.key,
+        baseValue: event.baseValue,
+        value: event.value,
+      }),
+    );
+    if (!this.online()) {
+      this.snackBar.open('已离线保存，待回网后同步', '关闭', { duration: 1800 });
+    }
+  }
+
+  syncNow(): void {
+    this.store.dispatch(TableActions.syncCommits());
+  }
+
+  retryCommit(commitId: string): void {
+    this.store.dispatch(TableActions.retryCommit({ commitId }));
+  }
+
+  resolveConflict(commitId: string, field: keyof TableRow, choice: 'local' | 'remote'): void {
+    this.store.dispatch(TableActions.resolveConflict({ commitId, field, choice }));
+    this.snackBar.open(choice === 'local' ? '已保留本地版本' : '已采用服务端版本', '关闭', { duration: 1600 });
+  }
+
+  toggleForceFailure(): void {
+    const next = !this.forceFailure();
+    this.forceFailure.set(next);
+    this.api.setForceFailure(next);
+  }
+
+  statusLabel(status: ChangeCommit['status']): string {
+    return {
+      pending: '待同步',
+      syncing: '同步中',
+      synced: '已同步',
+      conflict: '冲突',
+      failed: '失败',
+    }[status];
+  }
+
+  formatValue(value: string | number | boolean | null): string {
+    if (value === null || value === undefined || value === '') {
+      return '空';
+    }
+    return String(value);
   }
 
   toggleExpand(id: string): void {
@@ -759,7 +1025,24 @@ export class AppComponent {
     }
   }
 
+  /** 旧视图过期后确认再套用 */
   applyView(view: SavedView): void {
+    if (this.isViewStale(view)) {
+      const dialogRef = this.dialog.open(ConfirmDialogComponent, {
+        data: {
+          title: '视图已过期',
+          message: '该视图保存后数据已发生变更，套用将覆盖当前的筛选、排序与列配置。是否仍要套用？',
+          confirmText: '仍要套用',
+          cancelText: '取消',
+        },
+      });
+      dialogRef.afterClosed().subscribe((confirmed) => {
+        if (confirmed) {
+          this.store.dispatch(TableActions.applyView({ view }));
+        }
+      });
+      return;
+    }
     this.store.dispatch(TableActions.applyView({ view }));
   }
 
@@ -775,18 +1058,34 @@ export class AppComponent {
     this.setGroup(null);
   }
 
+  /** 导出按工作副本（已应用提交）重算，而非服务端旧值 */
   exportCsv(): void {
     const columns = this.visibleColumns();
     const header = columns.map((column) => column.label).join(',');
     const rows = this.tableState().rows.map((row) =>
       columns.map((column) => `"${String(row[column.key] ?? '').replaceAll('"', '""')}"`).join(','),
     );
-    const blob = new Blob([`\uFEFF${[header, ...rows].join('\n')}`], { type: 'text/csv;charset=utf-8' });
+    const blob = new Blob([`﻿${[header, ...rows].join('\n')}`], { type: 'text/csv;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = `销售订单-第${this.tableState().page + 1}页.csv`;
     link.click();
     URL.revokeObjectURL(link.href);
+  }
+
+  compactAmount(amount: number): string {
+    if (amount >= 100000000) return `${(amount / 100000000).toFixed(2)} 亿`;
+    if (amount >= 10000) return `${(amount / 10000).toFixed(1)} 万`;
+    return amount.toLocaleString('zh-CN');
+  }
+
+  /** 视图保存时间早于最近数据变更时间，即为过期 */
+  private isViewStale(view: SavedView): boolean {
+    const lastDataChangeAt = this.tableState().lastDataChangeAt;
+    if (!lastDataChangeAt) {
+      return false;
+    }
+    return new Date(view.createdAt).getTime() < new Date(lastDataChangeAt).getTime();
   }
 
   private countConditions(group: FilterGroup): number {

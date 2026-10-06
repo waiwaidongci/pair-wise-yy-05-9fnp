@@ -1,6 +1,8 @@
 import { createAction, props } from '@ngrx/store';
 import {
   CellValue,
+  ChangeCommit,
+  CommitSyncResult,
   FilterGroup,
   QueryResult,
   SavedView,
@@ -30,10 +32,26 @@ export const setDensity = createAction(
   '[Order Table] Set Density',
   props<{ density: 'compact' | 'standard' | 'comfortable' }>(),
 );
-export const updateCell = createAction(
-  '[Order Table] Update Cell',
-  props<{ id: string; key: keyof TableRow; value: CellValue }>(),
+export const commitCell = createAction(
+  '[Order Table] Commit Cell',
+  props<{ id: string; orderNo: string; key: keyof TableRow; baseValue: CellValue; value: CellValue }>(),
 );
+export const syncCommits = createAction('[Order Table] Sync Commits');
+export const syncCommitsSuccess = createAction(
+  '[Order Table] Sync Commits Success',
+  props<{ results: CommitSyncResult[]; syncedAt: string }>(),
+);
+export const syncCommitsFailure = createAction(
+  '[Order Table] Sync Commits Failure',
+  props<{ error: string; failedAt: string }>(),
+);
+export const retryCommit = createAction('[Order Table] Retry Commit', props<{ commitId: string }>());
+export const resolveConflict = createAction(
+  '[Order Table] Resolve Conflict',
+  props<{ commitId: string; field: keyof TableRow; choice: 'local' | 'remote' }>(),
+);
+export const setOnline = createAction('[Order Table] Set Online', props<{ online: boolean }>());
+export const clearSyncedCommits = createAction('[Order Table] Clear Synced Commits');
 export const saveView = createAction('[Order Table] Save View', props<{ name: string }>());
 export const applyView = createAction('[Order Table] Apply View', props<{ view: SavedView }>());
 export const deleteView = createAction('[Order Table] Delete View', props<{ id: string }>());

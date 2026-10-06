@@ -97,6 +97,7 @@ export interface GridColumn {
             [class.grid-row--selected]="selectedIds.includes(row.id)"
             [class.grid-row--active]="activeIndex === rowIndex"
             [class.grid-row--dirty]="dirtyIds.has(row.id)"
+            [class.grid-row--conflict]="conflictIds.includes(row.id)"
             [style.min-width.px]="gridWidth + 54"
             [style.height.px]="rowHeight"
             (click)="activate(rowIndex)"
@@ -158,6 +159,12 @@ export interface GridColumn {
               </div>
             }
             <div class="cell cell--tail">
+              @if (conflictIds.includes(row.id)) {
+                <mat-icon
+                  class="conflict-icon"
+                  matTooltip="同字段冲突：已保留双方版本，点击右侧处理"
+                >warning</mat-icon>
+              }
               <button mat-icon-button matTooltip="复制订单号" (click)="copyRow(row, $event)">
                 <mat-icon>content_copy</mat-icon>
               </button>
@@ -224,6 +231,22 @@ export interface GridColumn {
       height: 100%;
       background: #f79009;
       content: '';
+    }
+    .grid-row--conflict {
+      background: #fffaeb;
+    }
+    .grid-row--conflict::after {
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 3px;
+      height: 100%;
+      background: #b54708;
+      content: '';
+    }
+    .conflict-icon {
+      color: #b54708;
+      font-size: 18px;
     }
     .grid-row--tree-child .cell:first-of-type {
       padding-left: 30px;
@@ -342,13 +365,14 @@ export class DataGridComponent implements AfterViewInit {
   @Input() sort: SortState | null = null;
   @Input() selectedIds: string[] = [];
   @Input() dirtyCells: Record<string, CellValue> = {};
+  @Input() conflictIds: string[] = [];
   @Input() expandedIds: string[] = [];
   @Input() treeMode = false;
 
   @Output() sortChange = new EventEmitter<keyof TableRow>();
   @Output() resize = new EventEmitter<{ key: keyof TableRow; width: number }>();
   @Output() selectionChange = new EventEmitter<string[]>();
-  @Output() edit = new EventEmitter<{ id: string; key: keyof TableRow; value: CellValue }>();
+  @Output() edit = new EventEmitter<{ id: string; key: keyof TableRow; value: CellValue; baseValue: CellValue }>();
   @Output() expand = new EventEmitter<string>();
   @Output() inspect = new EventEmitter<TableRow>();
 
@@ -359,6 +383,7 @@ export class DataGridComponent implements AfterViewInit {
   editingId: string | null = null;
   editingKey: keyof TableRow | null = null;
   editValue: CellValue = '';
+  private editBaseValue: CellValue = '';
   private resizeStartX = 0;
   private resizeStartWidth = 0;
   private resizingColumn: keyof TableRow | null = null;
@@ -470,6 +495,7 @@ export class DataGridComponent implements AfterViewInit {
     this.editingId = row.id;
     this.editingKey = key;
     this.editValue = row[key];
+    this.editBaseValue = row[key];
   }
 
   commitEdit(row: TableRow, key: keyof TableRow): void {
@@ -478,7 +504,7 @@ export class DataGridComponent implements AfterViewInit {
     }
     const numerical = this.isNumeric(key);
     const nextValue = numerical ? Number(this.editValue) : String(this.editValue);
-    this.edit.emit({ id: row.id, key, value: nextValue });
+    this.edit.emit({ id: row.id, key, value: nextValue, baseValue: this.editBaseValue });
     this.cancelEdit();
   }
 

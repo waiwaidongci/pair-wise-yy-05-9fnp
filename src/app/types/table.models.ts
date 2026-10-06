@@ -106,6 +106,57 @@ export interface SavedView {
   treeMode: boolean;
 }
 
+/**
+ * 变更提交状态
+ * - pending: 待提交（本地已改，尚未同步）
+ * - syncing: 同步中
+ * - synced: 已入库
+ * - conflict: 同字段冲突，保留双方版本待处理
+ * - failed: 提交失败，可从副本重试
+ */
+export type CommitStatus = 'pending' | 'syncing' | 'synced' | 'conflict' | 'failed';
+
+/** 单个字段的变更：记录字段与本地基准值 */
+export interface FieldChange {
+  field: keyof TableRow;
+  baseValue: CellValue;
+  newValue: CellValue;
+}
+
+/** 同字段冲突：保留本地与服务端双方版本 */
+export interface CommitConflict {
+  field: keyof TableRow;
+  baseValue: CellValue;
+  localValue: CellValue;
+  remoteValue: CellValue;
+}
+
+/**
+ * 可追踪的变更提交。
+ * 一次提交记录订单号、若干字段变更及各自的本地基准值，
+ * 作为幂等与冲突判定的依据。
+ */
+export interface ChangeCommit {
+  id: string;
+  orderId: string;
+  orderNo: string;
+  changes: FieldChange[];
+  status: CommitStatus;
+  createdAt: string;
+  clientId: string;
+  syncedAt?: string;
+  error?: string;
+  conflicts?: CommitConflict[];
+}
+
+/** 服务端对一次提交的处理结果 */
+export interface CommitSyncResult {
+  commitId: string;
+  status: 'synced' | 'conflict';
+  duplicated?: boolean;
+  conflicts?: CommitConflict[];
+}
+
 export interface TableState {
   rows: TableRow[];
   total: number;
@@ -129,5 +180,10 @@ export interface TableState {
   elapsedMs: number;
   savedViews: SavedView[];
   activeViewId: string | null;
-  dirtyCells: Record<string, CellValue>;
+  /** 可追踪变更提交（本地副本） */
+  commits: ChangeCommit[];
+  online: boolean;
+  syncing: boolean;
+  /** 最近一次数据变更时间，用于视图过期判定 */
+  lastDataChangeAt: string | null;
 }
